@@ -27,6 +27,19 @@ mod native {
     }
 
     #[derive(Deserialize)]
+    struct WatchReq {
+        id: u32,
+        path: String,
+        recursive: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct UnwatchReq {
+        id: u32,
+        path: String,
+    }
+
+    #[derive(Deserialize)]
     struct IdReq {
         id: u32,
     }
@@ -49,24 +62,48 @@ mod native {
 
     static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
-    fn handle_create(input: &str) -> Result<Vec<u8>, String> {
-        let req: CreateReq = serde_json::from_str(input).map_err(|e| e.to_string())?;
-        let (tx, rx) = mpsc::channel();
+    fn empty_ok() -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
 
-        let mut watcher = RecommendedWatcher::new(
+    fn recursive_mode(recursive: bool) -> RecursiveMode {
+        if recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        }
+    }
+
+    fn create_state() -> Result<WatchState, String> {
+        let (tx, rx) = mpsc::channel();
+        let watcher = RecommendedWatcher::new(
             move |res| {
                 let _ = tx.send(res);
             },
             Config::default(),
         )
         .map_err(|e| e.to_string())?;
+        Ok(WatchState {
+            _watcher: watcher,
+            rx,
+        })
+    }
 
-        let mode = if req.recursive {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
-        watcher
+    fn handle_new(_input: &str) -> Result<Vec<u8>, String> {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut map = WATCHERS
+            .lock()
+            .map_err(|_| "notify lock poisoned".to_string())?;
+        map.insert(id, create_state()?);
+        serde_json::to_vec(&json!({ "id": id })).map_err(|e| e.to_string())
+    }
+
+    fn handle_create(input: &str) -> Result<Vec<u8>, String> {
+        let req: CreateReq = serde_json::from_str(input).map_err(|e| e.to_string())?;
+        let mut state = create_state()?;
+        let mode = recursive_mode(req.recursive);
+        state
+            ._watcher
             .watch(Path::new(&req.path), mode)
             .map_err(|e| e.to_string())?;
 
@@ -74,15 +111,39 @@ mod native {
         let mut map = WATCHERS
             .lock()
             .map_err(|_| "notify lock poisoned".to_string())?;
-        map.insert(
-            id,
-            WatchState {
-                _watcher: watcher,
-                rx,
-            },
-        );
+        map.insert(id, state);
 
         serde_json::to_vec(&json!({ "id": id })).map_err(|e| e.to_string())
+    }
+
+    fn handle_watch(input: &str) -> Result<Vec<u8>, String> {
+        let req: WatchReq = serde_json::from_str(input).map_err(|e| e.to_string())?;
+        let mut map = WATCHERS
+            .lock()
+            .map_err(|_| "notify lock poisoned".to_string())?;
+        let state = map
+            .get_mut(&req.id)
+            .ok_or_else(|| format!("invalid watcher id {}", req.id))?;
+        state
+            ._watcher
+            .watch(Path::new(&req.path), recursive_mode(req.recursive))
+            .map_err(|e| e.to_string())?;
+        empty_ok()
+    }
+
+    fn handle_unwatch(input: &str) -> Result<Vec<u8>, String> {
+        let req: UnwatchReq = serde_json::from_str(input).map_err(|e| e.to_string())?;
+        let mut map = WATCHERS
+            .lock()
+            .map_err(|_| "notify lock poisoned".to_string())?;
+        let state = map
+            .get_mut(&req.id)
+            .ok_or_else(|| format!("invalid watcher id {}", req.id))?;
+        state
+            ._watcher
+            .unwatch(Path::new(&req.path))
+            .map_err(|e| e.to_string())?;
+        empty_ok()
     }
 
     fn handle_poll(input: &str) -> Result<Vec<u8>, String> {
@@ -125,12 +186,15 @@ mod native {
             .map_err(|_| "notify lock poisoned".to_string())?;
         map.remove(&req.id)
             .ok_or_else(|| format!("invalid watcher id {}", req.id))?;
-        Ok(Vec::new())
+        empty_ok()
     }
 
     fn dispatch(op: &str, input: &str) -> Result<Vec<u8>, String> {
         match op {
+            "new" => handle_new(input),
             "create" => handle_create(input),
+            "watch" => handle_watch(input),
+            "unwatch" => handle_unwatch(input),
             "poll" => handle_poll(input),
             "close" => handle_close(input),
             _ => Err(format!("unsupported operation: {op}")),

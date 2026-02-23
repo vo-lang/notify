@@ -3,54 +3,103 @@ package notify
 import "encoding/json"
 
 type Watcher struct {
-ID uint32 `json:"id"`
+    ID uint32 `json:"id"`
 }
 
 type Event struct {
-Path string `json:"path"`
-Op   string `json:"op"`
+    Path string `json:"path"`
+    Op   string `json:"op"`
+}
+
+type idReq struct {
+    ID uint32 `json:"id"`
+}
+
+func marshalReq(v any) (string, error) {
+    b, err := json.Marshal(v)
+    if err != nil {
+        return "", err
+    }
+    return string(b), nil
+}
+
+func New() (Watcher, error) {
+    resp, err := RawCall("new", "{}")
+    if err != nil {
+        return Watcher{}, err
+    }
+    var out Watcher
+    if err = json.Unmarshal(resp, &out); err != nil {
+        return Watcher{}, err
+    }
+    return out, nil
 }
 
 func Create(path string, recursive bool) (Watcher, error) {
-req, _ := json.Marshal(struct {
-Path      string `json:"path"`
-Recursive bool   `json:"recursive"`
-}{path, recursive})
-resp, err := RawCall("create", string(req))
-if err != nil {
-return Watcher{}, err
+    watcher, err := New()
+    if err != nil {
+        return Watcher{}, err
+    }
+    if err = watcher.Watch(path, recursive); err != nil {
+        _ = watcher.Close()
+        return Watcher{}, err
+    }
+    return watcher, nil
 }
-var w Watcher
-if err = json.Unmarshal(resp, &w); err != nil {
-return Watcher{}, err
+
+func (w Watcher) Watch(path string, recursive bool) error {
+    req, err := marshalReq(struct {
+        ID        uint32 `json:"id"`
+        Path      string `json:"path"`
+        Recursive bool   `json:"recursive"`
+    }{w.ID, path, recursive})
+    if err != nil {
+        return err
+    }
+    _, err = RawCall("watch", req)
+    return err
 }
-return w, nil
+
+func (w Watcher) Unwatch(path string) error {
+    req, err := marshalReq(struct {
+        ID   uint32 `json:"id"`
+        Path string `json:"path"`
+    }{w.ID, path})
+    if err != nil {
+        return err
+    }
+    _, err = RawCall("unwatch", req)
+    return err
 }
 
 func (w Watcher) Poll(max int) ([]Event, error) {
-req, _ := json.Marshal(struct {
-ID  uint32 `json:"id"`
-Max int    `json:"max"`
-}{w.ID, max})
-resp, err := RawCall("poll", string(req))
-if err != nil {
-return nil, err
-}
-var out struct {
-Events []Event `json:"events"`
-}
-if err = json.Unmarshal(resp, &out); err != nil {
-return nil, err
-}
-return out.Events, nil
+    req, err := marshalReq(struct {
+        ID  uint32 `json:"id"`
+        Max int    `json:"max"`
+    }{w.ID, max})
+    if err != nil {
+        return nil, err
+    }
+    resp, err := RawCall("poll", req)
+    if err != nil {
+        return nil, err
+    }
+    var out struct {
+        Events []Event `json:"events"`
+    }
+    if err = json.Unmarshal(resp, &out); err != nil {
+        return nil, err
+    }
+    return out.Events, nil
 }
 
 func (w Watcher) Close() error {
-req, _ := json.Marshal(struct {
-ID uint32 `json:"id"`
-}{w.ID})
-_, err := RawCall("close", string(req))
-return err
+    req, err := marshalReq(idReq{w.ID})
+    if err != nil {
+        return err
+    }
+    _, err = RawCall("close", req)
+    return err
 }
 
 func RawCall(op string, input string) ([]byte, error)
