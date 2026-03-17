@@ -201,7 +201,7 @@ mod native {
         }
     }
 
-    #[vo_fn("github.com/vo-lang/notify", "RawCall")]
+    #[vo_fn("notify", "RawCall")]
     pub fn raw_call(call: &mut ExternCallContext) -> ExternResult {
         let op = call.arg_str(0);
         let input = call.arg_str(1);
